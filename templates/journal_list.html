@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}My Entries – Mood Journal{% endblock %}
+
+{% block content %}
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.2rem;">
+  <h1>My Entries</h1>
+  <a href="{{ url_for('journal_new') }}" class="btn btn-primary">+ New Entry</a>
+</div>
+
+{% if entries %}
+  {% for entry in entries %}
+  <a href="{{ url_for('journal_detail', entry_id=entry.id) }}" style="text-decoration:none; color:inherit;">
+    <div class="card" style="cursor:pointer;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+
+        <!-- Mood label badge — CSS class changes colour based on score -->
+        {% if entry.mood_score %}
+          {% if entry.mood_score >= 7 %}
+            <span class="mood-badge mood-positive">{{ entry.mood_label }}</span>
+          {% elif entry.mood_score >= 4 %}
+            <span class="mood-badge mood-neutral">{{ entry.mood_label }}</span>
+          {% else %}
+            <span class="mood-badge mood-negative">{{ entry.mood_label }}</span>
+          {% endif %}
+        {% else %}
+          <span class="mood-badge mood-neutral">No analysis</span>
+        {% endif %}
+
+        <!-- Date the entry was written -->
+        <span class="text-muted">
+          {{ entry.created_at[:10] }}  {# Slice gives us YYYY-MM-DD from the timestamp #}
+        </span>
+      </div>
+
+      <!-- Preview: first 150 characters of the entry -->
+      <p style="margin:0; color:#444;">
+        {{ entry.content[:150] }}{% if entry.content|length > 150 %}…{% endif %}
+      </p>
+    </div>
+  </a>
+  {% endfor %}
+{% else %}
+  <div class="card" style="text-align:center; padding:3rem;">
+    <p style="color:#888; margin-bottom:1rem;">No entries yet.</p>
+    <a href="{{ url_for('journal_new') }}" class="btn btn-primary">Write your first entry</a>
+  </div>
+{% endif %}
+{% endblock %}
