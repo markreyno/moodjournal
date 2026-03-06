@@ -17,24 +17,57 @@ supabase: Client = create_client(
     os.environ.get("SUPABASE_KEY"),
 )
 
+# Admin client uses the service_role key which bypasses Row Level Security.
+# We only use this in therapist routes, AFTER verifying the therapist-client
+# relationship in Python — never expose this key to the browser.
+supabase_admin: Client = create_client(
+    os.environ.get("SUPABASE_URL"),
+    os.environ.get("SUPABASE_SERVICE_KEY"),
+)
+
 # Initialise the Anthropic client — this is our connection to Claude for mood analysis
 anthropic = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
 
 # ---------------------------------------------------------------------------
-# Helper: check if the user is logged in
-# We store their Supabase access token in Flask's session after login.
+# Helpers
 # ---------------------------------------------------------------------------
+
 def get_current_user():
+    """Validate the stored access token with Supabase and return the user object."""
     token = session.get("access_token")
     if not token:
         return None
     try:
-        # Ask Supabase to validate the token and return the user object
         response = supabase.auth.get_user(token)
         return response.user
     except Exception:
         return None
+
+
+def get_role(user_id):
+    """Look up this user's role ('client' or 'therapist') from user_profiles."""
+    try:
+        resp = (
+            supabase_admin.table("user_profiles")
+            .select("role")
+            .eq("id", user_id)
+            .maybe_single()
+            .execute()
+        )
+        return resp.data["role"] if resp.data else "client"
+    except Exception:
+        return "client"
+
+
+def require_therapist(user):
+    """Return True if user exists and is a therapist; otherwise redirect."""
+    if not user:
+        return redirect(url_for("login"))
+    if session.get("role") != "therapist":
+        flash("Access restricted to therapists.", "error")
+        return redirect(url_for("dashboard"))
+    return None  # no redirect needed
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +76,16 @@ def get_current_user():
 
 @app.route("/")
 def index():
-    """Dashboard — show mood trends. Redirects to login if not authenticated."""
+    """Landing page for visitors; redirect logged-in users straight to dashboard."""
+    user = get_current_user()
+    if user:
+        return redirect(url_for("dashboard"))
+    return render_template("index.html")
+
+
+@app.route("/dashboard")
+def dashboard():
+    """Dashboard — show mood trends for the logged-in user."""
     user = get_current_user()
     if not user:
         return redirect(url_for("login"))
@@ -64,7 +106,22 @@ def index():
     scored = [e for e in entries if e.get("mood_score") is not None]
     avg_score = round(sum(e["mood_score"] for e in scored) / len(scored), 1) if scored else None
 
-    return render_template("index.html", user=user, entries=entries, avg_score=avg_score)
+    # Check for any pending therapist invites so we can show a banner
+    pending_invites = (
+        supabase_admin.table("therapist_clients")
+        .select("id")
+        .eq("client_email", user.email)
+        .eq("status", "pending")
+        .execute()
+    ).data
+
+    return render_template(
+        "dashboard.html",
+        user=user,
+        entries=entries,
+        avg_score=avg_score,
+        pending_invites=len(pending_invites),
+    )
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -82,8 +139,11 @@ def login():
             # Store the token in Flask's session cookie so we remember the user
             # across requests (HTTP is stateless by default).
             session["access_token"] = response.session.access_token
+            role = get_role(response.user.id)
+            session["role"] = role
             flash("Welcome back!", "success")
-            return redirect(url_for("index"))
+            # Send therapists to their portal, clients to their dashboard
+            return redirect(url_for("therapist_dashboard") if role == "therapist" else url_for("dashboard"))
         except Exception as e:
             # Supabase raises an exception for bad credentials — catch it and
             # show the user a friendly error instead of a crash page.
@@ -109,8 +169,13 @@ def signup():
             # on whether email confirmation is required.
             if response.session:
                 session["access_token"] = response.session.access_token
+                session["role"] = "client"
+                # Create the user_profiles row so we know this is a client
+                supabase_admin.table("user_profiles").insert(
+                    {"id": response.user.id, "role": "client"}
+                ).execute()
                 flash("Account created! Welcome to Mood Journal.", "success")
-                return redirect(url_for("index"))
+                return redirect(url_for("dashboard"))
             else:
                 # Email confirmation is enabled — tell the user to check inbox.
                 flash("Check your email to confirm your account, then log in.", "info")
@@ -258,6 +323,261 @@ def journal_delete(entry_id):
     supabase.table("journal_entries").delete().eq("id", entry_id).eq("user_id", user.id).execute()
     flash("Entry deleted.", "info")
     return redirect(url_for("journal_list"))
+
+
+# ---------------------------------------------------------------------------
+# Therapist signup
+# ---------------------------------------------------------------------------
+
+@app.route("/signup/therapist", methods=["GET", "POST"])
+def signup_therapist():
+    """Separate signup flow for licensed therapists."""
+    if request.method == "POST":
+        email    = request.form.get("email")
+        password = request.form.get("password")
+        name     = request.form.get("name", "").strip()
+        try:
+            response = supabase.auth.sign_up({"email": email, "password": password})
+            if response.session:
+                session["access_token"] = response.session.access_token
+                session["role"] = "therapist"
+                # Create user_profiles row with role='therapist'
+                supabase_admin.table("user_profiles").insert({
+                    "id":           response.user.id,
+                    "role":         "therapist",
+                    "display_name": name or email,
+                }).execute()
+                flash("Therapist account created!", "success")
+                return redirect(url_for("therapist_dashboard"))
+            else:
+                flash("Check your email to confirm your account, then log in.", "info")
+                return redirect(url_for("login"))
+        except Exception as e:
+            flash(f"Could not create account: {str(e)}", "error")
+
+    return render_template("signup_therapist.html")
+
+
+# ---------------------------------------------------------------------------
+# Therapist portal
+# ---------------------------------------------------------------------------
+
+@app.route("/therapist")
+def therapist_dashboard():
+    """Therapist home: list linked clients and allow adding new ones."""
+    user = get_current_user()
+    blocked = require_therapist(user)
+    if blocked:
+        return blocked
+
+    # Fetch all client links for this therapist
+    resp = (
+        supabase_admin.table("therapist_clients")
+        .select("*")
+        .eq("therapist_id", user.id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    clients = resp.data
+    return render_template("therapist_dashboard.html", user=user, clients=clients)
+
+
+@app.route("/therapist/add-client", methods=["POST"])
+def therapist_add_client():
+    """Add a client by email — creates a pending invite."""
+    user = get_current_user()
+    blocked = require_therapist(user)
+    if blocked:
+        return blocked
+
+    client_email = request.form.get("client_email", "").strip().lower()
+    if not client_email:
+        flash("Please enter a client email.", "error")
+        return redirect(url_for("therapist_dashboard"))
+
+    try:
+        supabase_admin.table("therapist_clients").insert({
+            "therapist_id": user.id,
+            "client_email": client_email,
+            "status":       "pending",
+        }).execute()
+        flash(f"Invite sent to {client_email}. They will see it when they next log in.", "success")
+    except Exception as e:
+        # The unique constraint on (therapist_id, client_email) prevents duplicates
+        flash("That client has already been invited.", "error")
+
+    return redirect(url_for("therapist_dashboard"))
+
+
+@app.route("/therapist/client/<client_id>/remove", methods=["POST"])
+def therapist_remove_client(client_id):
+    """Remove a client link entirely."""
+    user = get_current_user()
+    blocked = require_therapist(user)
+    if blocked:
+        return blocked
+
+    supabase_admin.table("therapist_clients").delete().eq(
+        "therapist_id", user.id
+    ).eq("client_id", client_id).execute()
+    flash("Client removed.", "info")
+    return redirect(url_for("therapist_dashboard"))
+
+
+@app.route("/therapist/client/<client_id>/report")
+def therapist_report(client_id):
+    """
+    Mood report for one client over a chosen period.
+    Therapist sees scores, labels and AI summaries — never raw journal text.
+    """
+    user = get_current_user()
+    blocked = require_therapist(user)
+    if blocked:
+        return blocked
+
+    # Verify this therapist is actually linked to this client
+    link = (
+        supabase_admin.table("therapist_clients")
+        .select("*")
+        .eq("therapist_id", user.id)
+        .eq("client_id", client_id)
+        .eq("status", "accepted")
+        .maybe_single()
+        .execute()
+    )
+    if not link.data:
+        flash("Client not found or not yet accepted your invite.", "error")
+        return redirect(url_for("therapist_dashboard"))
+
+    # Period selector — defaults to weekly
+    period = request.args.get("period", "weekly")
+    days   = {"weekly": 7, "biweekly": 14, "monthly": 30}.get(period, 7)
+    from datetime import datetime, timedelta, timezone
+    period_start = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    # Fetch mood data only — content column deliberately excluded
+    entries_resp = (
+        supabase_admin.table("journal_entries")
+        .select("id, mood_label, mood_score, mood_summary, created_at")
+        .eq("user_id", client_id)
+        .gte("created_at", period_start)
+        .order("created_at")
+        .execute()
+    )
+    entries = entries_resp.data
+
+    # ── Compute stats ────────────────────────────────────────────────────
+    scored = [e for e in entries if e.get("mood_score") is not None]
+    avg_score = round(sum(e["mood_score"] for e in scored) / len(scored), 1) if scored else None
+
+    # Label frequency: {"Anxious": 3, "Content": 2, ...}
+    from collections import Counter
+    label_counts = dict(Counter(
+        e["mood_label"] for e in entries if e.get("mood_label")
+    ))
+
+    # Trend: compare first-half avg vs second-half avg
+    trend = None
+    if len(scored) >= 4:
+        mid       = len(scored) // 2
+        first_avg = sum(e["mood_score"] for e in scored[:mid]) / mid
+        second_avg= sum(e["mood_score"] for e in scored[mid:]) / (len(scored) - mid)
+        diff      = second_avg - first_avg
+        trend = "improving" if diff > 0.5 else "declining" if diff < -0.5 else "stable"
+
+    # ── Claude narrative summary ─────────────────────────────────────────
+    # We summarise using only mood metadata, not journal text, to preserve privacy.
+    ai_summary = None
+    if entries:
+        try:
+            mood_data = "\n".join(
+                f"- {e['created_at'][:10]}: {e.get('mood_label','?')} "
+                f"(score {e.get('mood_score','?')}): {e.get('mood_summary','')}"
+                for e in entries
+            )
+            ai_resp = anthropic.messages.create(
+                model="claude-3-5-haiku-20241022",
+                max_tokens=250,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"You are assisting a licensed therapist. Based ONLY on the following "
+                        f"mood tracking data from the past {days} days, write a 2-3 sentence "
+                        f"clinical summary suitable for a therapy session. "
+                        f"Do not make assumptions beyond what the data shows.\n\n"
+                        f"{mood_data}"
+                    )
+                }]
+            )
+            ai_summary = ai_resp.content[0].text.strip()
+        except Exception:
+            ai_summary = None
+
+    return render_template(
+        "therapist_report.html",
+        user=user,
+        client_id=client_id,
+        client_email=link.data["client_email"],
+        entries=entries,
+        avg_score=avg_score,
+        label_counts=label_counts,
+        trend=trend,
+        ai_summary=ai_summary,
+        period=period,
+        days=days,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Client invite management
+# ---------------------------------------------------------------------------
+
+@app.route("/client/invites")
+def client_invites():
+    """Show pending therapist invites for the logged-in client."""
+    user = get_current_user()
+    if not user:
+        return redirect(url_for("login"))
+
+    # Find any pending invites addressed to this user's email
+    resp = (
+        supabase_admin.table("therapist_clients")
+        .select("*")
+        .eq("client_email", user.email)
+        .eq("status", "pending")
+        .execute()
+    )
+    invites = resp.data
+    return render_template("client_invites.html", user=user, invites=invites)
+
+
+@app.route("/client/invites/<invite_id>/accept", methods=["POST"])
+def client_invite_accept(invite_id):
+    """Accept a therapist invite — sets status to accepted and records client_id."""
+    user = get_current_user()
+    if not user:
+        return redirect(url_for("login"))
+
+    supabase_admin.table("therapist_clients").update({
+        "status":    "accepted",
+        "client_id": user.id,
+    }).eq("id", invite_id).eq("client_email", user.email).execute()
+    flash("Therapist connection accepted.", "success")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/client/invites/<invite_id>/decline", methods=["POST"])
+def client_invite_decline(invite_id):
+    """Decline a therapist invite — deletes the row."""
+    user = get_current_user()
+    if not user:
+        return redirect(url_for("login"))
+
+    supabase_admin.table("therapist_clients").delete().eq(
+        "id", invite_id
+    ).eq("client_email", user.email).execute()
+    flash("Invite declined.", "info")
+    return redirect(url_for("dashboard"))
 
 
 # ---------------------------------------------------------------------------
