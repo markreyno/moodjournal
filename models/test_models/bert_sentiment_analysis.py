@@ -2,7 +2,7 @@ from transformers import pipeline
 
 emotion_pipeline = pipeline(
     "sentiment-analysis", 
-    model="nlptown/bert-base-multilingual-uncased-sentiment",
+    model="bhadresh-savani/distilbert-base-uncased-emotion",
     top_k=None
 )
 
