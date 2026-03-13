@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Therapist Portal – Mood Journal{% endblock %}
+
+{% block content %}
+<h1>Therapist Portal</h1>
+
+<!-- Add client form -->
+<div class="card" style="margin-bottom:1.5rem;">
+  <h2>Add a client</h2>
+  <p class="text-muted" style="margin-bottom:0.75rem;">
+    Enter your client's email address. They'll see a notification to accept when they next log in.
+    Once accepted, you can view their mood reports.
+  </p>
+  <form method="POST" action="{{ url_for('therapist_add_client') }}"
+        style="display:flex; gap:0.75rem; flex-wrap:wrap;">
+    <input type="email" name="client_email" placeholder="client@email.com"
+           required style="flex:1; min-width:220px;" />
+    <button type="submit" class="btn btn-primary">Send invite</button>
+  </form>
+</div>
+
+<!-- Client list -->
+<h2 style="margin-bottom:0.75rem;">Your clients</h2>
+
+{% if clients %}
+  {% for client in clients %}
+  <div class="card" style="display:flex; align-items:center; justify-content:space-between; gap:1rem; flex-wrap:wrap;">
+    <div>
+      <strong>{{ client.client_email }}</strong>
+      <br>
+      <!-- Status badge -->
+      {% if client.status == 'accepted' %}
+        <span class="mood-badge mood-positive" style="margin-top:0.3rem;">Connected</span>
+      {% else %}
+        <span class="mood-badge mood-neutral" style="margin-top:0.3rem;">Pending acceptance</span>
+      {% endif %}
+    </div>
+
+    <div style="display:flex; gap:0.5rem;">
+      {% if client.status == 'accepted' %}
+        <!-- View report button — only available once connected -->
+        <a href="{{ url_for('therapist_report', client_id=client.client_id) }}"
+           class="btn btn-primary">View report</a>
+      {% endif %}
+
+      <!-- Remove link -->
+      <form method="POST"
+            action="{{ url_for('therapist_remove_client', client_id=client.client_id or 'pending') }}"
+            onsubmit="return confirm('Remove this client link?');">
+        <button type="submit" class="btn btn-outline">Remove</button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+{% else %}
+  <div class="card" style="text-align:center; padding:2.5rem; color:#888;">
+    No clients yet. Add one above to get started.
+  </div>
+{% endif %}
+{% endblock %}

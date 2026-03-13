@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Therapist Sign Up – Mood Journal{% endblock %}
+
+{% block content %}
+<div class="card" style="max-width: 440px; margin: 3rem auto;">
+  <h1>Therapist account</h1>
+  <p class="text-muted" style="margin-bottom:1.2rem;">
+    For licensed therapists only. Your clients control whether you can view their mood data.
+  </p>
+
+  <form method="POST" action="{{ url_for('signup_therapist') }}">
+    <div class="form-group">
+      <label for="name">Your name</label>
+      <input type="text" id="name" name="name" placeholder="Dr. Jane Smith" />
+    </div>
+
+    <div class="form-group">
+      <label for="email">Professional email</label>
+      <input type="email" id="email" name="email" required placeholder="you@practice.com" />
+    </div>
+
+    <div class="form-group">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" required
+             placeholder="••••••••" minlength="6" />
+      <span class="text-muted">At least 6 characters</span>
+    </div>
+
+    <button type="submit" class="btn btn-primary" style="width:100%;">
+      Create therapist account
+    </button>
+  </form>
+
+  <p class="text-muted" style="margin-top:1rem; text-align:center;">
+    Client account? <a href="{{ url_for('signup') }}">Sign up here</a>
+  </p>
+</div>
+{% endblock %}

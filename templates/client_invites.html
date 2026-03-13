@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Therapist Invites – Mood Journal{% endblock %}
+
+{% block content %}
+<h1>Therapist Invites</h1>
+
+{% if invites %}
+  {% for invite in invites %}
+  <div class="card" style="display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap;">
+    <div>
+      <strong>A therapist has requested access to your mood data</strong>
+      <p class="text-muted" style="margin:0.3rem 0 0;">
+        Invite sent: {{ invite.created_at[:10] }}
+      </p>
+      <p style="margin:0.4rem 0 0; font-size:0.9rem; color:#555;">
+        If you accept, your therapist will be able to view your mood scores, labels,
+        and AI summaries — but <strong>not</strong> your journal text.
+        You can remove the connection at any time.
+      </p>
+    </div>
+
+    <div style="display:flex; gap:0.5rem; flex-shrink:0;">
+      <form method="POST" action="{{ url_for('client_invite_accept', invite_id=invite.id) }}">
+        <button type="submit" class="btn btn-primary">Accept</button>
+      </form>
+      <form method="POST" action="{{ url_for('client_invite_decline', invite_id=invite.id) }}">
+        <button type="submit" class="btn btn-outline">Decline</button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+{% else %}
+  <div class="card" style="text-align:center; padding:2.5rem; color:#888;">
+    No pending invites.
+  </div>
+{% endif %}
+{% endblock %}

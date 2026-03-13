@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Mood Report – {{ client_email }}{% endblock %}
+
+{% block content %}
+
+<!-- Header -->
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.2rem; flex-wrap:wrap; gap:0.75rem;">
+  <div>
+    <a href="{{ url_for('therapist_dashboard') }}" class="btn btn-outline" style="margin-bottom:0.5rem;">← Back</a>
+    <h1 style="margin:0;">{{ client_email }}</h1>
+  </div>
+
+  <!-- Period selector -->
+  <div style="display:flex; gap:0.5rem;">
+    {% for p, label in [('weekly','Weekly'), ('biweekly','Bi-weekly'), ('monthly','Monthly')] %}
+      <a href="{{ url_for('therapist_report', client_id=client_id, period=p) }}"
+         class="btn {% if period == p %}btn-primary{% else %}btn-outline{% endif %}">
+        {{ label }}
+      </a>
+    {% endfor %}
+  </div>
+</div>
+
+{% if entries %}
+
+  <!-- AI narrative summary -->
+  {% if ai_summary %}
+  <div class="card" style="background:#f0f0ff; margin-bottom:1rem;">
+    <h2 style="margin-bottom:0.5rem;">Clinical summary</h2>
+    <p style="margin:0; line-height:1.7; color:#333;">{{ ai_summary }}</p>
+    <p class="text-muted" style="margin-top:0.5rem; font-size:0.8rem;">
+      Generated from mood metadata only. No journal text was used.
+    </p>
+  </div>
+  {% endif %}
+
+  <!-- Stats row -->
+  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(160px,1fr)); gap:1rem; margin-bottom:1rem;">
+
+    <div class="card" style="text-align:center;">
+      <p class="text-muted" style="margin-bottom:0.25rem;">Avg mood score</p>
+      {% if avg_score %}
+        <p style="font-size:2.2rem; font-weight:800; color:#4f46e5; margin:0;">
+          {{ avg_score }}<span style="font-size:0.9rem; color:#888;">/10</span>
+        </p>
+      {% else %}
+        <p style="color:#aaa;">—</p>
+      {% endif %}
+    </div>
+
+    <div class="card" style="text-align:center;">
+      <p class="text-muted" style="margin-bottom:0.25rem;">Entries</p>
+      <p style="font-size:2.2rem; font-weight:800; color:#4f46e5; margin:0;">{{ entries|length }}</p>
+    </div>
+
+    <div class="card" style="text-align:center;">
+      <p class="text-muted" style="margin-bottom:0.25rem;">Trend</p>
+      {% if trend == 'improving' %}
+        <p style="font-size:1.4rem; font-weight:700; color:#15803d; margin:0;">↑ Improving</p>
+      {% elif trend == 'declining' %}
+        <p style="font-size:1.4rem; font-weight:700; color:#b91c1c; margin:0;">↓ Declining</p>
+      {% elif trend == 'stable' %}
+        <p style="font-size:1.4rem; font-weight:700; color:#854d0e; margin:0;">→ Stable</p>
+      {% else %}
+        <p style="color:#aaa; margin:0;">Not enough data</p>
+      {% endif %}
+    </div>
+
+  </div>
+
+  <!-- Mood label breakdown -->
+  {% if label_counts %}
+  <div class="card" style="margin-bottom:1rem;">
+    <h2 style="margin-bottom:0.75rem;">Mood breakdown</h2>
+    <div style="display:flex; flex-wrap:wrap; gap:0.5rem;">
+      {% for label, count in label_counts.items()|sort(attribute='1', reverse=True) %}
+        <span class="mood-badge mood-neutral" style="font-size:0.9rem; padding:0.35rem 0.8rem;">
+          {{ label }} ×{{ count }}
+        </span>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Score timeline -->
+  <div class="card">
+    <h2 style="margin-bottom:0.75rem;">Entry timeline</h2>
+    {% for entry in entries %}
+    <div style="display:flex; align-items:center; gap:0.75rem; padding:0.6rem 0;
+                border-bottom:1px solid #f0f0f0;">
+      <!-- Score circle -->
+      <div style="width:38px; height:38px; border-radius:50%; background:#4f46e5; flex-shrink:0;
+                  display:flex; align-items:center; justify-content:center;">
+        <span style="color:#fff; font-weight:700; font-size:0.9rem;">
+          {% if entry.mood_score %}{{ entry.mood_score }}{% else %}?{% endif %}
+        </span>
+      </div>
+      <div style="flex:1;">
+        <div style="display:flex; justify-content:space-between;">
+          <strong>{{ entry.mood_label or 'Unknown' }}</strong>
+          <span class="text-muted">{{ entry.created_at[:10] }}</span>
+        </div>
+        {% if entry.mood_summary %}
+          <p style="margin:0.2rem 0 0; font-size:0.88rem; color:#555;">{{ entry.mood_summary }}</p>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+{% else %}
+  <div class="card" style="text-align:center; padding:3rem; color:#888;">
+    No entries found for this period. Try a longer time range.
+  </div>
+{% endif %}
+
+{% endblock %}
