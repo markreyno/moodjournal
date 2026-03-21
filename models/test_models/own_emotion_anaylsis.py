@@ -3,29 +3,13 @@
 # GoEmotions dataset: https://research.google/blog/goemotions-a-dataset-for-fine-grained-emotion-classification/
 # https://github.com/google-research/google-research/tree/master/goemotions
 
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
 
-# The dataset is split across 3 CSV files — load and merge them.
-# We sample 20k rows to keep training time manageable during development;
-# remove .sample() and restore n_estimators=100 when training for real results.
-df1 = pd.read_csv("C:/Users/reyno/moodjournal/models/test_models/data/full_dataset/goemotions_1.csv")
-df2 = pd.read_csv("C:/Users/reyno/moodjournal/models/test_models/data/full_dataset/goemotions_2.csv")
-df3 = pd.read_csv("C:/Users/reyno/moodjournal/models/test_models/data/full_dataset/goemotions_3.csv")
-
-combineddf = pd.concat([df1, df2, df3]).sample(n=20000, random_state=42)
-
-print(combineddf.head())
-print(combineddf.tail())
-print(combineddf.shape)
-print(combineddf.columns)
-
-# Drop metadata columns that carry no signal for emotion prediction.
-combineddf.drop(columns=["id", "author", "subreddit", "link_id", "parent_id", "created_utc", "rater_id"], inplace=True)
-
-print(combineddf.columns)
-
-# All 28 GoEmotions labels. Each is a binary column (1 = labeler assigned that emotion, 0 = not).
-# A single text can have multiple 1s, making this a multi-label problem.
+# All 28 GoEmotions labels in index order (0=admiration … 27=neutral).
+# The TSV files encode emotions as comma-separated integers, e.g. "2,15" means anger + gratitude.
 emotion_cols = ['admiration', 'amusement', 'anger', 'annoyance', 'approval', 'caring',
                 'confusion', 'curiosity', 'desire', 'disappointment', 'disapproval',
                 'disgust', 'embarrassment', 'excitement', 'fear', 'gratitude', 'grief',
@@ -33,18 +17,29 @@ emotion_cols = ['admiration', 'amusement', 'anger', 'annoyance', 'approval', 'ca
                 'relief', 'remorse', 'sadness', 'surprise', 'neutral'
 ]
 
-# X is the raw text input; y is the full binary label matrix (one column per emotion).
-X = combineddf["text"]
-y = combineddf[emotion_cols]
+def load_tsv(path):
+    """Load an official GoEmotions TSV split into texts and a binary label matrix."""
+    df = pd.read_csv(path, sep='\t', header=None, names=['text', 'labels', 'id'])
+    matrix = np.zeros((len(df), len(emotion_cols)), dtype=int)
+    for i, ids_str in enumerate(df['labels']):
+        for idx in str(ids_str).split(','):
+            matrix[i, int(idx.strip())] = 1
+    return df['text'].tolist(), matrix
 
-print("------------------------------------------------")
-print("Splitting the dataset into training and testing sets")
-print("------------------------------------------------")
+# Use the official GoEmotions splits so results are comparable to the paper.
+# train + dev are both used for training (maximises training data for classical ML).
+# test is held out for evaluation.
+data_dir = Path(__file__).resolve().parent / "data" / "full_dataset"
 
-from sklearn.model_selection import train_test_split
+X_train_raw, y_train_raw = load_tsv(data_dir / "train.tsv")
+X_dev_raw,   y_dev_raw   = load_tsv(data_dir / "dev.tsv")
+X_test,      y_test      = load_tsv(data_dir / "test.tsv")
 
-# Hold out 20% of data for evaluation so we test on text the models have never seen.
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+X_train = X_train_raw + X_dev_raw
+y_train = np.vstack([y_train_raw, y_dev_raw])
+
+print(f"Train samples : {len(X_train)}")
+print(f"Test  samples : {len(X_test)}")
 
 print("------------------------------------------------")
 print("Vectorizing the text data")
@@ -75,7 +70,7 @@ from sklearn.ensemble import RandomForestClassifier
 # Naive Bayes is fast and works well with sparse TF-IDF vectors.
 # Random Forest is slower but typically more accurate; n_jobs=-1 uses all CPU cores.
 nb_model = MultiOutputClassifier(MultinomialNB())
-rf_model = MultiOutputClassifier(RandomForestClassifier(n_estimators=10, random_state=42, n_jobs=-1))
+rf_model = MultiOutputClassifier(RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1))
 
 print("------------------------------------------------")
 print("Training the models")
@@ -88,19 +83,99 @@ print("------------------------------------------------")
 print("Evaluating the models")
 print("------------------------------------------------")
 
-from sklearn.metrics import accuracy_score, classification_report, f1_score
+from sklearn.metrics import (
+    accuracy_score, classification_report,
+    f1_score, precision_score, recall_score, roc_auc_score
+)
 
-rf_pred = rf_model.predict(X_test_tfidf)
-nb_pred = nb_model.predict(X_test_tfidf)
+# --- Metric explanations ---
+# Accuracy      : fraction of samples where EVERY emotion label is predicted correctly.
+#                 Very strict for multi-label — even one wrong label counts as a miss.
+# Precision     : of all the emotion labels the model predicted as present, how many actually were?
+#                 High precision = few false alarms (model is not trigger-happy).
+# Recall        : of all the emotion labels that were truly present, how many did the model find?
+#                 High recall = few misses (model catches most real emotions).
+# F1-score      : harmonic mean of precision and recall, balancing both into one number.
+#                 Useful when you care equally about false alarms and misses.
+# AUC-ROC       : measures how well the model ranks emotions by confidence score.
+#                 0.5 = random guessing, 1.0 = perfect separation. Robust to class imbalance
+#                 because it looks at predicted probabilities, not just the final 0/1 decision.
+# All multi-label metrics are averaged with 'macro', meaning each of the 28 emotions counts
+# equally regardless of how often it appears in the data.
 
-# Exact-match accuracy: a prediction only counts as correct if every emotion label matches.
-# This is a strict metric — Macro F1 below gives a fairer picture for imbalanced labels.
-accuracy = accuracy_score(y_test, rf_pred)
-
-# Macro F1 averages the F1 score across all 28 emotion labels equally,
-# so rare emotions (e.g. grief, pride) are weighted the same as common ones (e.g. neutral).
 for name, model in [("Naive Bayes", nb_model), ("Random Forest", rf_model)]:
     y_pred = model.predict(X_test_tfidf)
-    f1 = f1_score(y_test, y_pred, average='macro', zero_division=0)
-    print(f"\n{name} — Macro F1: {f1:.3f}")
-    print(classification_report(y_test, y_pred, target_names=emotion_cols, zero_division=0))
+    y_true = y_test
+
+    # Exact-match accuracy — every label must be right for a sample to count as correct.
+    accuracy = accuracy_score(y_true, y_pred)
+
+    # Macro-averaged precision, recall, F1 across all 28 emotion labels.
+    precision = precision_score(y_true, y_pred, average='macro', zero_division=0)
+    recall    = recall_score(y_true, y_pred, average='macro', zero_division=0)
+    f1        = f1_score(y_true, y_pred, average='macro', zero_division=0)
+
+    # AUC-ROC needs predicted probabilities, not hard 0/1 labels.
+    # MultiOutputClassifier exposes one estimator per label in .estimators_;
+    # we grab the positive-class probability (column index 1) from each.
+    y_prob = np.column_stack(
+        [est.predict_proba(X_test_tfidf)[:, 1] for est in model.estimators_]
+    )
+    # Skip any emotion columns where the test set has only one class (AUC is undefined there).
+    valid_cols = [i for i in range(y_true.shape[1]) if len(np.unique(y_true[:, i])) > 1]
+    auc_roc = roc_auc_score(y_true[:, valid_cols], y_prob[:, valid_cols], average='macro')
+
+    print(f"\n{'=' * 50}")
+    print(f"  {name}")
+    print(f"{'=' * 50}")
+    print(f"  Exact-Match Accuracy : {accuracy:.3f}")
+    print(f"  Macro Precision      : {precision:.3f}")
+    print(f"  Macro Recall         : {recall:.3f}")
+    print(f"  Macro F1             : {f1:.3f}")
+    print(f"  Macro AUC-ROC        : {auc_roc:.3f}  (over {len(valid_cols)}/28 labels)")
+    print()
+    print(classification_report(y_true, y_pred, target_names=emotion_cols, zero_division=0))
+
+# ---------------------------------------------------------------------------
+# Interactive prediction — type any text and both models will score it
+# ---------------------------------------------------------------------------
+def predict(text: str, top_n: int = 5) -> None:
+    """Vectorise a single text and print the top_n emotions from each model."""
+    vec = vectorizer.transform([text])
+
+    print(f"\n  Input : \"{text}\"")
+    print(f"  {'─' * 46}")
+
+    for name, mdl in [("Naive Bayes", nb_model), ("Random Forest", rf_model)]:
+        # Grab the positive-class probability for each of the 28 emotions.
+        probs = np.array([
+            est.predict_proba(vec)[0, 1] for est in mdl.estimators_
+        ])
+        # Sort descending and take top_n.
+        top_idx = np.argsort(probs)[::-1][:top_n]
+
+        print(f"\n  {name} — top {top_n} emotions:")
+        for i in top_idx:
+            bar = "█" * int(probs[i] * 20)
+            print(f"    {emotion_cols[i]:<18} {probs[i]:.2%}  {bar}")
+
+print("\n" + "=" * 50)
+print("  Emotion Predictor  (type 'quit' to exit)")
+print("=" * 50)
+
+while True:
+    try:
+        user_input = input("\nEnter text: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nExiting.")
+        break
+
+    if user_input.lower() in {"quit", "exit", "q"}:
+        print("Exiting.")
+        break
+
+    if not user_input:
+        print("  Please enter some text.")
+        continue
+
+    predict(user_input)
